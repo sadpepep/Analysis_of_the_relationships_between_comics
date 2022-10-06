@@ -1,0 +1,547 @@
+---
+output: html_document
+---
+by: Safronova Anna (azsafronova)
+
+## Исследование структуры взаимосвязей между комиксами.
+
+\
+
+#### **Первый исследовательский вопрос:** 
+**Какие узлы сети представляются наиболее значимыми (по параметрам betweenness и degree)? Как в сети распределяются связи в зависимости от различных характеристик (колонок) датасета?**
+
+```{r echo = F, message = F, warning = F}
+
+library(igraph)
+library(dplyr)
+comics_net = read_graph("~/shared/minor2_2020/data/good_read/book_net.hml", 
+                        format = "graphml")
+load("~/shared/minor2_2020/data/good_read/books_net_info.RData")
+
+books = books_net_info %>% select(-title_without_series, -link, -title, -authors.0.role, -authors.1.role, -country_code)
+#Для упрощения анализа я убрала колонки, которые не пригодятся для получения каких-либо выводов из данных.
+  
+```
+
+Для начала, рассчитаем betweenness (оценка вершины на близость по посредничеству, показатель того, насколько важен данный узел как "мост") и degree (число (входящих и выходящих) связей с другими вершинами) исходной сети.
+
+```{r echo = F, message = F, warning = F}
+
+library(tibble)
+
+degree = data.frame(degree = degree(comics_net)) %>% arrange(-degree) %>% rownames_to_column() %>% rename(id = rowname)
+betweenness = data.frame(betweenness = betweenness(comics_net)) %>% arrange(-betweenness) %>% rownames_to_column() %>% rename(id = rowname)
+
+d = degree %>% filter(id %in% betweenness$id)
+b = betweenness %>% filter(id %in% degree$id)
+bd = full_join(b, d)
+
+DT::datatable(bd, options = list(
+bPaginate = TRUE
+))
+
+```
+
+Теперь мы хотим посмотреть на распределение связей внутри различных категорий комиксов (т.е. по столбцам датасета books_net_info). Однако, если осуществлять эту операцию с целой сетью, то никаких практических выводов из визуализации мы сделать не сможем. Поэтому разобъем сеть на сообщества с помощью наиболее подходящего метода (узнаем это благодаря параметру модулярности), а затем построим сеть для какого-то конкретного сообщества.
+
+\
+
+\
+
+#### **Второй исследовательский вопрос:** 
+**Какие сообщества можно выделить в исходной сети? Какие алгоритмы выделения сообществ подходят лучше всего?**
+
+```{r echo = F, message = F, warning = F}
+
+library(igraph)
+
+edge.betweenness.community = modularity(edge.betweenness.community(comics_net))
+fastgreedy.community = modularity(fastgreedy.community(comics_net))
+multilevel.community = modularity(multilevel.community(comics_net))
+walktrap.community = modularity(walktrap.community(comics_net))
+infomap.community = modularity(infomap.community(comics_net))
+
+edge = length(sizes(edge.betweenness.community(comics_net)))
+fastgreedy = length(sizes(fastgreedy.community(comics_net)))
+multilevel = length(sizes(multilevel.community(comics_net)))
+walktrap = length(sizes(walktrap.community(comics_net)))
+infomap = length(sizes(infomap.community(comics_net)))
+
+
+Algorithms = data.frame('Алгоритм' = c('Edge Betweenness', 'Fastgreedy', 'Multilevel', 'Walktrap', 'Infomap'), Modularity = c(edge.betweenness.community, fastgreedy.community, multilevel.community, walktrap.community, infomap.community), 'Число_сообществ' = c(edge, fastgreedy, multilevel, walktrap, infomap)) %>% arrange(-Modularity) %>% rename('Модулярность' = Modularity)
+
+knitr::kable(Algorithms)
+
+```
+
+Как мы видим, лучший алгоритм для анализа - это *Multilevel*. Рассмотрим выявленные им сообщества:
+
+```{r echo = F, message = F, warning = F}
+
+multi <- multilevel.community(comics_net)
+
+#plot(multi, comics_net)
+
+library(ggforce)
+library(concaveman)
+library(ggraph)
+library(tidygraph)
+
+comics_net %>% 
+  as_tbl_graph() %>%
+  mutate(Multilevel_Groups = factor(membership(multi))) %>% 
+  ggraph(layout = "nicely") +
+  geom_edge_link(alpha = 0.1) +
+  theme_graph()+
+  geom_mark_hull(
+    aes(x, y, group = Multilevel_Groups, fill = Multilevel_Groups),
+    concavity = 4,
+    expand = unit(2, "mm"),
+    alpha = 0.25
+  )
+
+```
+
+Посмотрим поподробнее на структуру сообществ, выделенных методом *Multilevel*:
+
+```{r echo = F, message = F, warning = F}
+
+m = data.frame(sizes(multilevel.community(comics_net))) %>% rename('Число узлов в группе' = Freq, rowname = Community.sizes) %>% column_to_rownames()
+
+DT::datatable(m, options = list(
+bPaginate = TRUE
+))
+
+```
+
+Мы видим распределение узлов в сообществах. 9ая по счету группа комиксов включает в себя всего 26 точек, это значит, что ее нетрудно будет визуализировать. Но что покажет нам визуализация? По какому признаку выделено сообщество? Попробуем ответить на эти вопросы с помощью ассортативности.
+
+```{r echo = F, message = F, warning = F}
+
+vertices1 = data.frame(book_id = as.numeric(V(comics_net)$name))
+books_fixed1 = left_join(vertices1, books_net_info)
+
+
+V(comics_net)$authors.0.author_id = books_fixed1$authors.0.author_id
+authors.0.author_id = assortativity_nominal(comics_net, as.factor(V(comics_net)$authors.0.author_id), directed = T)
+
+V(comics_net)$authors.1.author_id = books_fixed1$authors.1.author_id
+authors.1.author_id = assortativity_nominal(comics_net, as.factor(V(comics_net)$authors.1.author_id), directed = T)
+
+V(comics_net)$average_rating = books_fixed1$average_rating
+average_rating = assortativity(comics_net, as.numeric(V(comics_net)$average_rating), directed = T)
+
+V(comics_net)$ratings_count = books_fixed1$ratings_count
+ratings_count = assortativity_nominal(comics_net, as.numeric(V(comics_net)$ratings_count), directed = T)
+
+V(comics_net)$publisher = books_fixed1$publisher
+publisher = assortativity_nominal(comics_net, as.factor(V(comics_net)$publisher), directed = T)
+
+
+assortativity = data.frame("Категории" = c('authors.0.author_id', 'authors.1.author_id', 'average_rating', 'ratings_count', 'publisher'), "Ассортативность" = c(authors.0.author_id, authors.1.author_id, average_rating, ratings_count, publisher)) %>% arrange(-Ассортативность)
+
+knitr::kable(assortativity)
+
+```
+
+Наибольшей ассортативностью обладает категория 'publisher'. Поскольку сеть построена на основе оценок пользователей, большая ассортативность переменной означает наличие зависимости между ней и оценками. Выходит, издание наиболее вероятно (в отличие от остальных категорий) может влиять на оценку комикса пользователями.
+
+Проверим на всякий случай значение p-value с помощью теста перестановок, чтобы убедиться в том, что полученный результат применим к данным и не случаен.
+
+```{r echo = F, message = F, warning = F}
+
+V(comics_net)$publisher = books_fixed1$publisher
+
+#assort publisher
+V(comics_net)$publisher = books_fixed1$publisher
+assort_publisher <- assortativity_nominal(comics_net, as.factor(V(comics_net)$publisher), directed = F)
+number_of_permutations = 5000
+assort_shuffled <- rep(NA, number_of_permutations)
+for(i in 1:number_of_permutations){
+V(comics_net)$attr_shuffled = sample(V(comics_net)$publisher, replace = F)
+assort_shuffled[i] = assortativity_nominal(comics_net,as.factor(V(comics_net)$attr_shuffled))
+}
+pvalue = sum(abs(assort_shuffled) >= abs(assort_publisher)) / number_of_permutations
+
+nigga = data.frame(p_value = pvalue)
+knitr::kable(nigga)
+
+```
+
+\
+
+Отразим в таблице только те 'book_id', что входят в 9ое сообщество.
+
+```{r echo = F, message = F, warning = F}
+
+mul = multilevel.community(comics_net)
+mul = data.frame(mul[9])
+
+books_filtered = books %>% filter(book_id %in% mul$X9)
+
+books_to_show = books_filtered %>% select(book_id, publisher, average_rating, publication_year)
+
+DT::datatable(books_to_show, options = list(
+bPaginate = TRUE
+))
+
+comics = delete_vertices(comics_net, V(comics_net)[!(V(comics_net)$name %in% books_filtered$book_id)])
+
+
+#Поскольку id комиксов в таблице и графе расположены в разном порядке, упорядочим их.
+vertices = data.frame(book_id = as.numeric(V(comics)$name))
+books_fixed = left_join(vertices, books_filtered)
+
+#Проверим, правильно ли все упорядочилось
+sum = sum(books_fixed$book_id == as.numeric(V(comics)$name))
+
+```
+
+Построим теперь сеть, основанную только на получившихся 'book_id', а далее визуализируем связи внутри нее - так мы получим распределение взаимодействий между 26ю комиксами, все из которых относятся к изданию 'Image Comics'.
+
+\
+
+\
+
+Выявим "наиболее значимые" (по параметрам betweenness и degree) вершины в новой сети и сравним такие их характеристики, как: (1.1) *"popular_shelves.0.name"*, *"popular_shelves.1.name"*, *"popular_shelves.2.name"*, *"popular_shelves.3.name"*, (1.2) *"average_rating"*, (1.3) *"publication_year"*.
+
+
+\
+
+
+
+
+**1.1)** ***К каким категориям полок комиксов относятся "наиболее значимые" узлы отфильтрованной сети? (Построим отельный график для каждой из характеристик: "popular_shelves.0.name", "popular_shelves.1.name", "popular_shelves.2.name", "popular_shelves.3.name")***
+
+В этом и всех последующих графиках размер вершин сделаем эквивалентным значению "degree/6" (то есть, чем больше вершина, тем больше количество ее связей). Прозрачность будет равна значению "3*betweenness" (чем менее прозрачна точка, тем она более важна как "мост").
+
+```{r echo = F, message = F, warning = F}
+
+#В исходном датасете колонка содержит некоторые одинаковые значения категорий, но вписанные по-разному: так, "cómics" и "comics" - это одно и то же; "graphic-novels" и "graphic-novel" - также одно и то же. Чтобы не прийти к неправильным выводам, приведем все подобные повторяющиеся категории к единому виду. (То есть по сути я произвожу своего рода лемматизацию вручную.)
+
+unique0 = unique(books_fixed$popular_shelves.0.name)
+popular_shelves.0.name_norm = case_when(
+                 books_filtered$popular_shelves.0.name == "to-read" ~ "to-read",
+                 books_filtered$popular_shelves.0.name == "favorites" ~ "favorites",
+                 books_fixed$popular_shelves.0.name == "còmics" ~ "comics",
+                 books_fixed$popular_shelves.0.name == "cómics" ~ "comics",
+                 books_fixed$popular_shelves.0.name == "comics" ~ "comics",
+                 books_fixed$popular_shelves.0.name == "dc" ~ "dc",
+                 books_fixed$popular_shelves.0.name == "graphic-novels" ~ "graphic-novel",
+                 books_fixed$popular_shelves.0.name == "graphic-novel" ~ "graphic-novel",
+                 books_fixed$popular_shelves.0.name == "mangá" ~ "manga",
+                 books_fixed$popular_shelves.0.name == "manga" ~ "manga",
+                 books_fixed$popular_shelves.0.name == "dc-comics" ~ "dc",
+                 books_fixed$popular_shelves.0.name == "star-wars" ~ "star-wars",
+                 books_fixed$popular_shelves.0.name == "currently-reading" ~ "currently-reading",
+                 books_fixed$popular_shelves.0.name == "romance" ~ "romance",
+                 books_fixed$popular_shelves.0.name == "fantasy" ~ "fantasy",
+                 books_fixed$popular_shelves.0.name == "horror" ~ "horror")
+
+books_fixed$popular_shelves.0.name_norm = popular_shelves.0.name_norm 
+V(comics)$popular_shelves.0.name_norm = books_fixed$popular_shelves.0.name_norm
+
+comics %>%
+  as_tbl_graph() %>%
+  mutate(bet = centrality_betweenness(), deg = centrality_degree()) %>%
+  ggraph(layout = "auto") +
+  geom_edge_link(alpha = 0.07, color = "black") +
+  geom_node_point(aes(colour = factor(popular_shelves.0.name_norm)), size = degree(comics)/6, alpha = 3*betweenness(comics)) +
+  geom_node_text(aes(filter = bet>0 & deg>0, label = name), family = "arial", size = 3, nudge_y = 0.06) +
+  theme_graph() +
+  labs(color = 'Shelves Names №0') +
+  scale_color_brewer(palette = "Set1")
+
+```
+
+Исходя из характеристики "popular_shelves.0.name", "наиболее значимые" вершины относятся к категории *"to-read"* (id: 23000709, 27474528, 30027126 и многие другие) и *"graphic-novel"* (id: 25337337).
+
+```{r echo = F, message = F, warning = F}
+
+unique1 = unique(books_fixed$popular_shelves.1.name)
+popular_shelves.1.name_norm = case_when(
+                 books_fixed$popular_shelves.1.name == "graphic-novels" ~ "graphic-novel",
+                 books_fixed$popular_shelves.1.name == "mangá" ~ "manga",
+                 books_fixed$popular_shelves.1.name == "manga" ~ "manga",
+                 books_fixed$popular_shelves.1.name == "cómics" ~ "comics",
+                 books_fixed$popular_shelves.1.name == "comics" ~ "comics",
+                 books_fixed$popular_shelves.1.name == "horror" ~ "horror",
+                 books_fixed$popular_shelves.1.name == "currently-reading" ~ "currently-reading",
+                 books_fixed$popular_shelves.1.name == "to-read" ~ "to-read",
+                 books_fixed$popular_shelves.1.name == "graphic-novel" ~ "graphic-novel",
+                 books_fixed$popular_shelves.1.name == "young-adult" ~ "young-adult",
+                 books_fixed$popular_shelves.1.name == "fantasy" ~ "fantasy",
+                 books_fixed$popular_shelves.1.name == "zombies" ~ "zombies",
+                 books_fixed$popular_shelves.1.name == "star-wars" ~ "star-wars",
+                 books_fixed$popular_shelves.1.name == "dc" ~ "dc",
+                 books_fixed$popular_shelves.1.name == "fiction" ~ "fiction",
+                 books_fixed$popular_shelves.1.name == "batman" ~ "batman",
+                 books_fixed$popular_shelves.1.name == "science-fiction" ~ "science-fiction",
+                 books_fixed$popular_shelves.1.name == "favorites" ~ "favorites",
+                 books_fixed$popular_shelves.1.name == "vampires" ~ "vampires")
+
+books_fixed$popular_shelves.1.name_norm = popular_shelves.1.name_norm 
+V(comics)$popular_shelves.1.name_norm = books_fixed$popular_shelves.1.name_norm
+
+comics %>%
+  as_tbl_graph() %>%
+  mutate(bet = centrality_betweenness(), deg = centrality_degree()) %>%
+  ggraph(layout = "auto") +
+  geom_edge_link(alpha = 0.07, color = "black") +
+  geom_node_point(aes(colour = factor(popular_shelves.1.name_norm)), size = degree(comics)/6, alpha = 3*betweenness(comics)) +
+  geom_node_text(aes(filter = bet>0 & deg>0, label = name), family = "arial", size = 3, nudge_y = 0.06) +
+  theme_graph() +
+  labs(color = 'Shelves Names №1') +
+  scale_color_brewer(palette = "Set1")
+
+```
+
+Исходя из характеристики "popular_shelves.1.name", "наиболее значимые" вершины относятся к категориям *"graphic-novel"* (id: 23000709, 27474528, 30027126 и многие другие) и *"comics"* (id: 25337337 и многие другие).
+
+```{r echo = F, message = F, warning = F}
+
+unique2 = unique(books_fixed$popular_shelves.2.name)
+popular_shelves.2.name_norm = case_when(
+                 books_fixed$popular_shelves.2.name == "cómics" ~ "comics",
+                 books_fixed$popular_shelves.2.name == "comics" ~ "comics",
+                 books_fixed$popular_shelves.2.name == "star-wars" ~ "star-wars",
+                 books_fixed$popular_shelves.2.name == "x-men" ~ "x-men",
+                 books_fixed$popular_shelves.2.name == "currently-reading" ~ "currently-reading",
+                 books_fixed$popular_shelves.2.name == "romance" ~ "romance",
+                 books_fixed$popular_shelves.2.name == "marvel" ~ "marvel",
+                 books_fixed$popular_shelves.2.name == "vampires" ~ "vampires",
+                 books_fixed$popular_shelves.2.name == "superheroes" ~ "superheroes",
+                 books_fixed$popular_shelves.2.name == "mangá" ~ "manga",
+                 books_fixed$popular_shelves.2.name == "manga" ~ "manga",
+                 books_fixed$popular_shelves.2.name == "sci-fi" ~ "science-fiction",
+                 books_fixed$popular_shelves.2.name == "science-fiction" ~ "science-fiction",
+                 books_fixed$popular_shelves.2.name == "dc" ~ "dc",
+                 books_fixed$popular_shelves.2.name == "dc-comics" ~ "dc",
+                 books_fixed$popular_shelves.2.name == "graphic-novel" ~ "graphic-novel",
+                 books_fixed$popular_shelves.2.name == "graphic-novels" ~ "graphic-novel",
+                 books_fixed$popular_shelves.2.name == "comics-graphic-novels" ~ "graphic-novel",
+                 books_fixed$popular_shelves.2.name == "fantasy" ~ "fantasy",
+                 books_fixed$popular_shelves.2.name == "favorites" ~ "favorites",
+                 books_fixed$popular_shelves.2.name == "avatar" ~ "avatar",
+                 books_fixed$popular_shelves.2.name == "fiction" ~ "fiction",
+                 books_fixed$popular_shelves.2.name == "one-piece" ~ "one-piece", 
+                 books_fixed$popular_shelves.2.name == "fables" ~ "fables",
+                 books_fixed$popular_shelves.2.name == "naruto" ~ "naruto", 
+                 books_fixed$popular_shelves.2.name == "horror" ~ "horror",
+                 books_fixed$popular_shelves.2.name == "books-i-own" ~ "books-i-own",
+                 books_fixed$popular_shelves.2.name == "batman" ~ "batman",
+                 books_fixed$popular_shelves.2.name == "to-read" ~ "to-read",
+                 books_fixed$popular_shelves.2.name == "zombies" ~ "zombies",
+                 books_fixed$popular_shelves.2.name == "stephen-king" ~ "stephen-king",
+                 books_fixed$popular_shelves.2.name == "mystery" ~ "mystery",
+                 books_fixed$popular_shelves.2.name == "manhwa" ~ "manhwa")
+
+books_fixed$popular_shelves.2.name_norm = popular_shelves.2.name_norm
+V(comics)$popular_shelves.2.name_norm = books_fixed$popular_shelves.2.name_norm
+
+comics %>%
+  as_tbl_graph() %>%
+  mutate(bet = centrality_betweenness(), deg = centrality_degree()) %>%
+  ggraph(layout = "auto") +
+  geom_edge_link(alpha = 0.07, color = "black") +
+  geom_node_point(aes(colour = factor(popular_shelves.2.name_norm)), size = degree(comics)/6, alpha = 3*betweenness(comics)) +
+  geom_node_text(aes(filter = bet>0 & deg>0, label = name), family = "arial", size = 3, nudge_y = 0.06) +
+  theme_graph() +
+  labs(color = 'Shelves Names №2')
+
+```
+ 
+Исходя из характеристики "popular_shelves.2.name", "наиболее значимые" вершины относятся к категориям *"comics"* (id: 23000709, 27474528, 30027126 и многие другие), *"graphic-novel"* (id: 25337337 и многие другие). 
+
+```{r echo = F, message = F, warning = F}
+
+unique3 = unique(books_fixed$popular_shelves.3.name)
+popular_shelves.3.name_norm = case_when(
+                 books_fixed$popular_shelves.3.name == "graphic-novel" ~ "graphic-novel",
+                 books_fixed$popular_shelves.3.name == "graphic-novels" ~ "graphic-novel",
+                 books_fixed$popular_shelves.3.name == "comics-graphic-novels" ~ "graphic-novel",                         books_fixed$popular_shelves.3.name == "batman" ~ "batman",
+                 books_fixed$popular_shelves.3.name == "vampires" ~ "vampires",
+                 books_fixed$popular_shelves.3.name == "historical-fiction" ~ "historical-fiction",
+                 books_fixed$popular_shelves.3.name == "fiction" ~ "fiction",
+                 books_fixed$popular_shelves.3.name == "science-fiction" ~ "science-fiction",
+                 books_fixed$popular_shelves.3.name == "sci-fi" ~ "science-fiction",
+                 books_fixed$popular_shelves.3.name == "green-lantern" ~ "green-lantern",
+                 books_fixed$popular_shelves.3.name == "dc-comics" ~ "dc",
+                 books_fixed$popular_shelves.3.name == "dc" ~ "dc",
+                 books_fixed$popular_shelves.3.name == "to-read" ~ "to-read",
+                 books_fixed$popular_shelves.3.name == "comic-books" ~ "comics",
+                 books_fixed$popular_shelves.3.name == "cómics" ~ "comics",
+                 books_fixed$popular_shelves.3.name == "comic" ~ "comics",
+                 books_fixed$popular_shelves.3.name == "comics" ~ "comics",
+                 books_fixed$popular_shelves.3.name == "star-wars-canon" ~ "star-wars-canon",
+                 books_fixed$popular_shelves.3.name == "death-note" ~ "death-note",
+                 books_fixed$popular_shelves.3.name == "favorites" ~ "favorites",
+                 books_fixed$popular_shelves.3.name == "crime" ~ "crime",
+                 books_fixed$popular_shelves.3.name == "fantasy" ~ "fantasy",
+                 books_fixed$popular_shelves.3.name == "horror" ~ "horror",
+                 books_fixed$popular_shelves.3.name == "young-adult" ~ "young-adult",
+                 books_fixed$popular_shelves.3.name == "adventure" ~ "adventure",
+                 books_fixed$popular_shelves.3.name == "the-walking-dead" ~ "the-walking-dead",
+                 books_fixed$popular_shelves.3.name == "yaoi" ~ "yaoi",
+                 books_fixed$popular_shelves.3.name == "mangá" ~ "manga",
+                 books_fixed$popular_shelves.3.name == "x-men" ~ "x-men",
+                 books_fixed$popular_shelves.3.name == "ya" ~ "ya",
+                 books_fixed$popular_shelves.3.name == "currently-reading" ~ "currently-reading",
+                 books_fixed$popular_shelves.3.name == "non-fiction" ~ "non-fiction",
+                 books_fixed$popular_shelves.3.name == "marvel" ~ "marvel",
+                 books_fixed$popular_shelves.3.name == "romance" ~ "romance",
+                 books_fixed$popular_shelves.3.name == "superman" ~ "superman",
+                 books_fixed$popular_shelves.3.name == "black-butler" ~ "black-butler",
+                 books_fixed$popular_shelves.3.name == "zombies" ~ "zombies",
+                 books_fixed$popular_shelves.3.name == "memoir" ~ "memoir",
+                 books_fixed$popular_shelves.3.name == "middle-grade" ~ "middle-grade",
+                 books_fixed$popular_shelves.3.name == "fairy-tales" ~ "fairy-tales",
+                 books_fixed$popular_shelves.3.name == "superheroes" ~ "superheroes")
+
+books_fixed$popular_shelves.3.name_norm = popular_shelves.3.name_norm
+V(comics)$popular_shelves.3.name_norm = books_fixed$popular_shelves.3.name_norm
+
+comics %>%
+  as_tbl_graph() %>%
+  mutate(bet = centrality_betweenness(), deg = centrality_degree()) %>%
+  ggraph(layout = "auto") +
+  geom_edge_link(alpha = 0.07, color = "black") +
+  geom_node_point(aes(colour = factor(popular_shelves.3.name_norm)), , size = degree(comics)/6, alpha = 3*betweenness(comics)) +
+  geom_node_text(aes(filter = bet>0 & deg>0, label = name), family = "arial", size = 3, nudge_y = 0.06) +
+  theme_graph() +
+  labs(color = 'Shelves Names №3')
+
+```
+
+Исходя из характеристики "popular_shelves.3.name", "наиболее значимые" вершины относятся к категориям *"horror"* (id: 2300709, 27474528, 30027126 и многие другие), *"graphic_novel"* (id: 25337337 и многие другие), а также *"comics"*.
+
+
+\
+
+
+
+
+**1.2)** ***К каким категориям рейтинга комиксов относятся "наиболее значимые" узлы отфильтрованной сети?***
+
+```{r echo = F, message = F, warning = F}
+
+books_fixed$average_rating = as.numeric(books_fixed$average_rating)
+rate = case_when(
+                 books_fixed$average_rating >= 4.2 ~ "GOOD (rate: 4,2 - 4,7)",
+                 books_fixed$average_rating >= 3.7 ~ "AVERAGE (rate: 3,7 - 4,2)",
+                 books_fixed$average_rating < 3.7 ~ "BAD (rate: 3,2 - 3,7)")
+books_fixed$rate = rate
+V(comics)$rate = books_fixed$rate
+
+comics %>%
+  as_tbl_graph() %>%
+  mutate(bet = centrality_betweenness(), deg = centrality_degree()) %>%
+  ggraph(layout = "auto") +
+  geom_edge_link(alpha = 0.07, color = "black") +
+  geom_node_point(aes(colour = factor(rate)), size = degree(comics)/6, alpha = 3*betweenness(comics)) +
+  geom_node_text(aes(filter = bet>0 & deg>0, label = name), family = "arial", size = 3, nudge_y = 0.06) +
+  theme_graph() +
+  labs(color = 'Comics Rates')
+
+```
+
+На графе преобладают комиксы с оценкой 4.2 и выше. Три знакомых нам вершины принадлежат к категории *"GOOD"* (id: 23000709, 25337337, 30027126 и многие другие), одна - к категории *"AVERAGE"* (id: 27474528 и многие другие).
+
+
+Заметим, что количество отзывов на комиксы в исходном датасете разное, отчего некоторые оценки становятся невалидными. Нарисуем график с учетом этого.
+
+```{r echo = F, message = F, warning = F}
+
+#Рейтинги комиксов, количество которых меньше среднего по датафрейму, примем невалидными, поэтому исключим их, чтобы не ошибиться в дальнейшем анализе.
+rate_num = case_when(
+                 books_fixed$ratings_count >= mean(as.numeric(books_fixed$ratings_count)) ~ 'considerable',
+                 books_fixed$ratings_count < mean(as.numeric(books_fixed$ratings_count)) ~ 'non-considerable')
+books_fixed$rate_num = rate_num
+books_considerable = books_fixed %>% filter(rate_num == 'considerable')
+
+vertices1 = data.frame(book_id = as.numeric(V(comics)$name))
+books_fixed1 = left_join(vertices1, books_considerable)
+
+
+books_fixed1$average_rating = as.numeric(books_fixed1$average_rating)
+rate = case_when(
+                 books_fixed1$average_rating >= 4.2 ~ "GOOD (rate: 4,2 - 4,7)",
+                 books_fixed1$average_rating >= 3.7 ~ "AVERAGE (rate: 3,7 - 4,2)",
+                 books_fixed1$average_rating < 3.7 ~ "BAD (rate: 3,2 - 3,7)")
+books_fixed1$rate = rate
+
+books_fixed1[is.na(books_fixed1)] <- 'non-considerable rates'
+
+V(comics)$rate = books_fixed1$rate
+
+
+comics %>%
+  as_tbl_graph() %>%
+  mutate(bet = centrality_betweenness(), deg = centrality_degree()) %>%
+  ggraph(layout = "auto") +
+  geom_edge_link(alpha = 0.07, color = "black") +
+  geom_node_point(aes(colour = factor(rate)), size = degree(comics)/6, alpha = 3*betweenness(comics)) +
+  geom_node_text(aes(filter = bet>0 & deg>0, label = name), family = "arial", size = 3, nudge_y = 0.06) +
+  theme_graph() +
+  labs(color = 'Comics Rates') +
+  scale_color_brewer(palette = "Accent")
+
+```
+
+Мы приняли количество отзывов, меньшее среднего, незначительным для анализа (обозначив на графике, как "non-considerable rates"). Все id, которые мы выделяли ранее, относятся к категории отзывов, имеющих значение для анализа.
+
+
+\
+
+
+
+
+**1.3)** ***К каким категориям года выпуска комиксов относятся "наиболее значимые" узлы отфильтрованной сети?***
+ 
+```{r echo = F, message = F, warning = F}
+
+books_fixed$publication_year = as.numeric(books_fixed$publication_year)
+year = case_when(
+                 books_fixed$publication_year >= 2004 ~ "new (2004-2017)",
+                 books_fixed$publication_year < 2004 ~ "old (1991-2004)")
+books_fixed$year = year
+
+books_withoutNAyears = books_fixed %>% na.omit()
+V(comics)$year = books_withoutNAyears$year
+
+comics %>%
+  as_tbl_graph() %>%
+  mutate(bet = centrality_betweenness(), deg = centrality_degree()) %>%
+  ggraph(layout = "auto") +
+  geom_edge_link(alpha = 0.07, color = "black") +
+  geom_node_point(aes(colour = factor(year)), size = degree(comics)/6, alpha = 3*betweenness(comics)) +
+  geom_node_text(aes(filter = bet>0 & deg>0, label = name), family = "arial", size = 3, nudge_y = 0.06) +
+  theme_graph() +
+  labs(color = 'Publications') +
+  scale_color_brewer(palette = "Set1")
+
+```
+
+Все "наиболее значимые" вершины относятся к категориям *новых комиксов* (id: 23000709, 25337337, 30027126, 27474528 и многие другие). *Старые комиксы* вовсе не представлены на графике.
+
+
+\
+
+
+##### **ВЫВОД:** 
+\  \  \ **Исходная сеть comics_net состоит из 777 наблюдений, betweenness и degree которых несложно найти (и с помощью них определить наиболее значимые для сети вершины - см. табл.№1). Однако такое количество узлов абсолютно не подходит для наглядной визуализации - невозможно построить какой-либо информативный график по всем комиксам сразу.**
+
+\  \  \ **Поэтому с помощью метода Multilevel я разделяю сеть на сообщества, а далее - рассматриваю немногочисленную группу комиксов под номером 9. Что это за группа? По какому признаку она выделена? На данные вопросы можно ответить с помощью параметра ассортативности, который показал, что наиболее вероятно на формирование в сети сообществ влияет характеристика 'publisher' (т.е. издатель). Проверяем данную характеристику в 9ой группе и выясняем, что все комиксы сообщества относятся к изданию Image Comics. (Данная деталь в принципе не имеет смысла для анализа и просто является интересной характеристикой группы.)**
+
+\  \  \ **Определив остальные характеристики сообщества (см. табл.№4) мы отфильтровываем исходную сеть так, чтобы она включала в себя только книги из сообщества 9. При этом некоторые связи разрываются, а параметры degree, betweenness и другие меры центральности изменяются. Однако сохраняются узлы группы и связи внутри нее - именно это мне и было интересно изучить.**
+
+\  \  \ **Построив графики с учетом мер центральности, я увидела распределение связей в группе по различным характеристикам. А также узнала, что в полученной сети наиболее значимыми (обладающими максимальными среди остальных значениями мер betweenness и degree) являются комиксы со следующими id: 23000709, 25337337, 30027126, 27474528.**
+
+
+\
+
+
+
+
+
+
